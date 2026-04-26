@@ -1,0 +1,23 @@
+# Layer 1: Application Layer (Streamlit UI)
+streamlit==1.28.1
+
+# Layer 2: Orchestration Layer (The Agent Brain)
+langgraph==0.0.27
+langsmith==0.1.23
+groq==0.4.2
+
+# Layer 3: Hybrid Knowledge Store (Memory)
+neo4j==5.14.1
+chromadb==0.4.22
+sentence-transformers==2.2.2
+
+# Layer 4: MCP Tool Layer (Data Connectors)
+requests==2.31.0
+pandas==2.1.4
+
+# General Utilities
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.0.0
+reportlab==4.0.7
+openpyxl==3.1.2
