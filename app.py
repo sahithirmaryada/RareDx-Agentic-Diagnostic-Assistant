@@ -88,7 +88,7 @@ with st.sidebar:
     elif catalog_error:
         st.error(f"Structured input catalog unavailable: {catalog_error}")
 
-    # st.divider()
+    st.divider()
     st.header("👤  Patient Profile")
     patient_id = st.text_input("Patient ID", value="PID-test-xx", key="patient_id")
     patient_age = st.number_input("Age", 1, 100, 30, key="patient_age")
@@ -96,11 +96,38 @@ with st.sidebar:
     st.divider()
     st.info("No evidence, no diagnosis. RareDx strictly enforces evidence-based outputs.")
 
-# Custom CSS for "The Glass Box" Aesthetic
+# Updated Custom CSS for "The Glass Box" Aesthetic
 st.markdown("""
     <style>
-    .main { background-color: #f8f9fa; }
+    /* Change the background of the entire app */
+    .stApp { background-color: #f8f9fa; }
+
+    /* Target the "Primary" buttons specifically to override the orange */
+    div.stButton > button:first-child {
+        background-color: #307fa7;
+        color: white;
+        border: none;
+    }
+    
+    /* Change hover state of the button */
+    div.stButton > button:first-child:hover {
+        background-color: #025077;
+        color: white;
+    }
+
+    /* Style the tabs to remove the orange underline */
+    button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p {
+        font-weight: bold;
+    }
+    
+    /* The active tab underline */
+    button[data-baseweb="tab-list"] {
+        gap: 20px;
+    }
+
+    /* Your existing card and badge styles */
     .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e9ecef; }
+    
     .evidence-card {
         background-color: #ffffff;
         padding: 20px;
@@ -109,6 +136,7 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.05);
         margin-bottom: 15px;
     }
+
     .icd-badge {
         background-color: #e7f3ff;
         color: #007bff;
@@ -117,24 +145,16 @@ st.markdown("""
         font-weight: bold;
         font-size: 0.85rem;
     }
-    .trust-pill {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 2px 10px;
-        border-radius: 15px;
-        font-size: 0.75rem;
-        border: 1px solid #c3e6cb;
-    }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 4. Main Multi-Tab Interface ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "✚ Clinical Input", 
+    "📋 Clinical Input", 
     "✔️ Diagnostic Results", 
     "🔎 Evidence Explorer", 
     "👀 Audit Trail",
-    "📥 Download Report"
+    "⬇️ Download Report"
 ])
 
 # --- TAB 1: Clinical Input ---
@@ -242,8 +262,28 @@ with tab3:
         
         with col_b:
             st.markdown("#### 📚 PubMed Evidence")
-            for pmid in t_map.get("citations", []):
-                st.link_button(f"PMID: {pmid}", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+            citations = t_map.get("citations", [])
+            if citations:
+                for pmid in citations:
+                    # Find the article details from the full candidate data
+                    article_details = None
+                    for candidate in st.session_state.diagnostic_results.get("candidates", []):
+                        for article in candidate.get("citations", []):
+                            if article.get("pmid") == pmid:
+                                article_details = article
+                                break
+                        if article_details:
+                            break
+                    
+                    if article_details:
+                        with st.expander(f"📄 {article_details.get('title', 'Unknown Title')} ({article_details.get('year', 'Unknown Year')})"):
+                            st.markdown(f"**PMID:** {pmid}")
+                            st.markdown(f"**Abstract:** {article_details.get('abstract', 'No abstract available')}")
+                            st.link_button("View on PubMed", article_details.get("url", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
+                    else:
+                        st.link_button(f"PMID: {pmid}", f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+            else:
+                st.write("No PubMed articles found.")
         
         st.markdown("#### ✅ Clinical Validation (MCP)")
         for val in t_map.get("mcp_validation", ["No additional grounded metadata available."]):

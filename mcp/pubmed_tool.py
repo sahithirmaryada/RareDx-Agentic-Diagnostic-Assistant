@@ -136,10 +136,78 @@ def fetch_details(pmid_list):
     return [f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" for pmid in pmid_list]
 
 
+def fetch_pubmed_details(pmid_list):
+    """Fetch detailed PubMed article information including titles and abstracts."""
+    if not pmid_list:
+        return []
+
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {
+        "db": "pubmed",
+        "id": ",".join(pmid_list),
+        "retmode": "xml",
+        "rettype": "abstract",
+    }
+    if NCBI_API_KEY and not NCBI_API_KEY.startswith("your_"):
+        params["api_key"] = NCBI_API_KEY
+
+    try:
+        response = requests.get(base_url, params=params, timeout=15)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+
+        articles = []
+        for article in root.findall(".//PubmedArticle"):
+            medline_citation = article.find(".//MedlineCitation")
+            if medline_citation is None:
+                continue
+
+            pmid_elem = medline_citation.find(".//PMID")
+            pmid = pmid_elem.text if pmid_elem is not None else None
+
+            article_elem = medline_citation.find(".//Article")
+            if article_elem is None:
+                continue
+
+            title_elem = article_elem.find(".//ArticleTitle")
+            title = title_elem.text if title_elem is not None else "No title available"
+
+            abstract_elem = article_elem.find(".//Abstract")
+            abstract = ""
+            if abstract_elem is not None:
+                abstract_texts = abstract_elem.findall(".//AbstractText")
+                abstract = " ".join([text.text for text in abstract_texts if text.text])
+
+            pub_date_elem = article_elem.find(".//PubDate")
+            year = ""
+            if pub_date_elem is not None:
+                year_elem = pub_date_elem.find(".//Year")
+                if year_elem is not None:
+                    year = year_elem.text
+
+            articles.append({
+                "pmid": pmid,
+                "title": title,
+                "abstract": abstract[:500] + "..." if len(abstract) > 500 else abstract,  # Truncate long abstracts
+                "year": year,
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            })
+
+        return articles
+    except requests.Timeout:
+        logger.error("PubMed eFetch request timed out", exc_info=True)
+        return []
+    except requests.RequestException as e:
+        logger.error(f"Error during PubMed details fetch: {e}", exc_info=True)
+        return []
+
+
 def search_research(disease_query, orphacode=None):
     local_results = find_orphanet_citations(disease_query, orphacode=orphacode)
     if local_results:
-        return local_results
+        # Convert URLs back to PMIDs and fetch details
+        pmids = [url.rstrip('/').split('/')[-1] for url in local_results if url.strip()]
+        return fetch_pubmed_details(pmids)
 
     if CACHE_FILE.exists():
         with open(CACHE_FILE, "r") as f:
@@ -156,7 +224,7 @@ def search_research(disease_query, orphacode=None):
 
     logger.info(f"Searching PubMed for {disease_query}...")
     ids = get_pubmed_ids(disease_query)
-    results = fetch_details(ids)
+    results = fetch_pubmed_details(ids)
 
     if results:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)

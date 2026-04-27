@@ -133,6 +133,16 @@ def fusion_node(state: AgentState):
                 "summary": res.get("summary"),
             }
 
+    # Ensure graph-only candidates also get PubMed citations if available
+    graph_only_citation_count = 0
+    for candidate in candidate_map.values():
+        if not candidate["citations"] and candidate.get("disease"):
+            candidate["citations"] = resolve_citations(
+                candidate["disease"], candidate.get("orphacode")
+            )
+            if candidate["citations"] and candidate["graph_paths"]:
+                graph_only_citation_count += 1
+
     verified = [
         candidate
         for candidate in candidate_map.values()
@@ -144,7 +154,10 @@ def fusion_node(state: AgentState):
         "timestamp": str(datetime.now()),
         "node": "FusionGuard",
         "action": "60/40 Weighted Fusion Applied",
-        "details": f"Verified {len(verified)} candidates. Dropped {len(candidate_map)-len(verified)}."
+        "details": (
+            f"Verified {len(verified)} candidates. Dropped {len(candidate_map)-len(verified)}. "
+            f"Resolved PubMed citations for {graph_only_citation_count} graph-only candidate(s)."
+        ),
     }
     return {"candidates": verified, "audit_trail": [log]}
 
@@ -177,9 +190,9 @@ def validation_node(state: AgentState):
             else "No local ICD-10 mapping found"
         )
         enriched_candidate["citation_status"] = (
-            f"{len(enriched_candidate['citations'])} local PubMed citations found"
+            f"{len(enriched_candidate['citations'])} PubMed articles found"
             if enriched_candidate["citations"]
-            else "No local PubMed citations found"
+            else "No PubMed articles found"
         )
         validated_candidates.append(enriched_candidate)
 
@@ -225,7 +238,7 @@ def report_node(state: AgentState):
         "confidence_score": f"{top['score']:.2f}",
         "icd10": top.get("icd10"),
         "graph_paths": top.get("graph_paths", []),
-        "citations": top.get("citations", []),
+        "citations": [article["pmid"] for article in top.get("citations", []) if article.get("pmid")],
         "mcp_validation": state.get("validated_evidence", []),
     }
     
@@ -238,12 +251,8 @@ def report_node(state: AgentState):
 
 
 def resolve_citations(disease_name, orphacode=None):
-    pmids = []
-    for url in search_research(disease_name, orphacode=orphacode):
-        match = re.search(r"/(\d+)/?$", url)
-        if match:
-            pmids.append(match.group(1))
-    return list(dict.fromkeys(pmids))
+    articles = search_research(disease_name, orphacode=orphacode)
+    return articles
 
 
 def resolve_icd10_code(disease_name, orphacode=None):
