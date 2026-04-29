@@ -102,7 +102,7 @@ st.markdown("""
     /* Change the background of the entire app */
     .stApp { background-color: #f8f9fa; }
 
-    /* Target the "Primary" buttons specifically to override the orange */
+    /* Target the "Primary" buttons specifically to override the default orange */
     div.stButton > button:first-child {
         background-color: #307fa7;
         color: white;
@@ -115,21 +115,57 @@ st.markdown("""
         color: white;
     }
 
-    /* Style the tabs to remove the orange underline */
-    button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p {
-        font-weight: bold;
+    /* Style tabs with larger headers and container appearance */
+    button[data-baseweb="tab"] {
+        font-size: 14px !important;
+        padding: 12px 12px !important;
+        font-weight: 600 !important;
+        border-radius: 5px;
+        margin-right: 0px;
+        background-color: #e9ecef;
+        border: 1px solid #dee2e6;
+        color: #495057;
+        transition: all 0.3s ease;
     }
     
-    /* The active tab underline */
+    /* Hover effect for tabs */
+    button[data-baseweb="tab"]:hover {
+        background-color: #dee2e6;
+        border-color: #adb5bd;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    
+    /* Active tab styling with prominent container look */
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background-color: #307fa7;
+        color: white;
+        border-color: #025077;
+        box-shadow: 0 6px 12px rgba(48, 127, 167, 0.3);
+    }
+    
+    /* Tab list container spacing */
     button[data-baseweb="tab-list"] {
-        gap: 20px;
+        gap: 0px;
+        padding: 10px;
+        background-color: #f1f3f5;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        margin-top: -30px;
+        border: 1px solid #dee2e6;
+    }
+    
+    /* Text inside tabs */
+    button[data-baseweb="tab"] div[data-testid="stMarkdownContainer"] p {
+        font-weight: 600;
+        font-size: 14px;
     }
 
     /* Your existing card and badge styles */
     .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e9ecef; }
     
     .evidence-card {
-        background-color: #ffffff;
+        background-color: #e9ecef;
         padding: 20px;
         border-radius: 12px;
         border-left: 5px solid #007bff;
@@ -150,11 +186,11 @@ st.markdown("""
 
 # --- 4. Main Multi-Tab Interface ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📋 Clinical Input", 
-    "✔️ Diagnostic Results", 
-    "🔎 Evidence Explorer", 
-    "👀 Audit Trail",
-    "⬇️ Download Report"
+    "1. Clinical Input", 
+    "2. Diagnostic Results", 
+    "3. Evidence Explorer", 
+    "4. Audit Trail",
+    "5. Download Report"
 ])
 
 # --- TAB 1: Clinical Input ---
