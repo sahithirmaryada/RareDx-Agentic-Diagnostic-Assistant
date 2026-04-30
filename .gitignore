@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .env
 data/
+!data/
+data/*
+!data/eval/
+data/eval/*
+!data/eval/rare_disease_cases.jsonl
+To-do.txt

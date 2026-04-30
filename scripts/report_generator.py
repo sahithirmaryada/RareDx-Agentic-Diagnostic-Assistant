@@ -119,15 +119,24 @@ def generate_pdf_report(
     # --- Ranked Candidates ---
     elements.append(Paragraph("Ranked Diagnostic Candidates", heading_style))
     if candidates:
-        candidate_data = [["Rank", "Disease Name", "Confidence", "ICD-10", "Evidence"]]
+        candidate_data = [["Rank", "Disease Name", "Rank Score", "ICD-10", "Evidence"]]
         for idx, can in enumerate(candidates[:10], 1):
-            evidence_str = ", ".join(can.get("evidence_badges", []))
+            if not isinstance(can, dict) or can is None:
+                can = {}
+            evidence_str = ", ".join(can.get("evidence_badges") or [])
+            disease_name = str(can.get("disease", "Unknown"))[:30]
+            score_value = can.get("score", 0.0)
+            try:
+                score_text = f"{float(score_value):.2f}"
+            except (TypeError, ValueError):
+                score_text = "0.00"
+            icd_value = can.get("icd10", "N/A") or "N/A"
             candidate_data.append(
                 [
                     str(idx),
-                    can.get("disease", "Unknown")[:30],
-                    f"{int(can.get('score', 0) * 100)}%",
-                    can.get("icd10", "N/A")[:15],
+                    disease_name,
+                    score_text,
+                    str(icd_value)[:15],
                     evidence_str[:40],
                 ]
             )
@@ -251,16 +260,23 @@ def generate_excel_report(
         if candidates:
             candidate_records = []
             for idx, can in enumerate(candidates, 1):
+                if not isinstance(can, dict) or can is None:
+                    can = {}
+                score_value = can.get("score", 0.0)
+                try:
+                    score_number = round(float(score_value), 6)
+                except (TypeError, ValueError):
+                    score_number = 0.0
                 candidate_records.append(
                     {
                         "Rank": idx,
                         "Disease Name": can.get("disease", "Unknown"),
-                        "Confidence Score": f"{int(can.get('score', 0) * 100)}%",
+                        "Rank Score": score_number,
                         "Orphanet Code": can.get("orphacode", "N/A"),
                         "ICD-10 Code": can.get("icd10", "N/A"),
-                        "Matched Symptoms": "; ".join(can.get("matched_symptoms", [])),
-                        "Matched Genes": "; ".join(can.get("matched_genes", [])),
-                        "Evidence Badges": "; ".join(can.get("evidence_badges", [])),
+                        "Matched Symptoms": "; ".join(can.get("matched_symptoms") or []),
+                        "Matched Genes": "; ".join(can.get("matched_genes") or []),
+                        "Evidence Badges": "; ".join(can.get("evidence_badges") or []),
                     }
                 )
             pd.DataFrame(candidate_records).to_excel(writer, sheet_name="Candidates", index=False)

@@ -3,7 +3,7 @@ Configuration management for RareDx using Pydantic for validation.
 All environment variables are required - no defaults for sensitive data.
 """
 from pathlib import Path
-from pydantic import validator
+from pydantic import model_validator, validator
 from pydantic_settings import BaseSettings
 
 
@@ -24,6 +24,10 @@ class RareDxConfig(BaseSettings):
     chroma_host: str = "localhost"
     chroma_port: int = 8000
     biolord_model_name: str = "FremyCompany/BioLORD-2023"
+
+    # Hybrid Ranking
+    graph_weight: float = 0.6
+    semantic_weight: float = 0.4
 
     # Data Files
     orphanet_product1_xml: str = "data/raw/en_product1.xml"
@@ -50,6 +54,21 @@ class RareDxConfig(BaseSettings):
         if not v or not v.strip():
             raise ValueError("This field cannot be empty")
         return v.strip()
+
+    @validator("graph_weight", "semantic_weight")
+    def validate_weight_range(cls, v):
+        if v < 0.0 or v > 1.0:
+            raise ValueError("Fusion weights must be between 0.0 and 1.0")
+        return v
+
+    @model_validator(mode="after")
+    def validate_fusion_weight_sum(self):
+        total = self.graph_weight + self.semantic_weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "GRAPH_WEIGHT and SEMANTIC_WEIGHT must sum to 1.0"
+            )
+        return self
 
     @property
     def project_root(self) -> Path:

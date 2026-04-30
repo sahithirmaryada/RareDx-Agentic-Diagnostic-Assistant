@@ -37,12 +37,15 @@ The agent workflow expects a state dictionary with the following keys:
 - `validated_evidence`: list[str]
 - `final_report`: dict
 - `audit_trail`: list[dict]
+- `ranking_strategy`: optional str, one of `fusion`, `graph_only`, `semantic_only`
+- `graph_weight`: optional float, defaults to `GRAPH_WEIGHT`
+- `semantic_weight`: optional float, defaults to `SEMANTIC_WEIGHT`
 
 ### Node Outputs
 - `entity_extractor_node` returns normalized clinician input and initial audit record
 - `graph_query_node` returns `graph_results` with `disease`, `orphacode`, `score`, `graph_paths`, `matched_symptoms`, `matched_genes`
 - `semantic_search_node` returns `semantic_results` with `disease`, `orphacode`, `score`, `summary`, and citation URLs
-- `fusion_node` returns combined `candidates` and drops unsupported ones
+- `fusion_node` validates/logs graph and semantic weights, returns combined `candidates`, and drops unsupported ones
 - `validation_node` adds ICD-10 mapping and evidence badges
 - `report_node` returns `final_report` containing summary and `traceability_map`
 
@@ -56,11 +59,14 @@ The agent workflow expects a state dictionary with the following keys:
 - Input: lists of symptom strings and gene symbols
 - Output: list of dicts with keys:
   - `disease`, `orphacode`, `score`, `graph_paths`, `matched_symptoms`, `matched_genes`
+- `graph_paths` should use the renderer-compatible relationship format:
+  - `Disease[<name>] -[:HAS_SYMPTOM]-> Symptom[<term>]`
+  - `Disease[<name>] -[:ASSOCIATED_GENE]-> Gene[<symbol>]`
 
-### `query_semantic(clinical_note, limit=5)`
-- Input: free-text clinical note string
+### `query_semantic(clinical_note, selected_symptoms=None, selected_genes=None, limit=10)`
+- Input: free-text clinical note string plus optional phenotype terms and gene symbols
 - Output: list of dicts with keys:
-  - `disease`, `orphacode`, `score`, `summary`
+  - `disease`, `orphacode`, `score`, `summary`, `matched_symptoms`, `matched_genes`, `source_pmids`
 
 ### `get_infrastructure_status()`
 - Returns a dict with `neo4j`, `chroma`, and `ready` flags

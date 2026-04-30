@@ -1,10 +1,12 @@
-import os
-from pathlib import Path
 from functools import lru_cache
 import logging
+import json
 from core.config import config
 
 logger = logging.getLogger(__name__)
+SEMANTIC_COLLECTION = "rare_disease_summaries"
+SEMANTIC_POOL_SIZE = 50
+STRUCTURED_TERM_LIMIT = 50
 
 try:
     from neo4j import GraphDatabase
@@ -28,6 +30,7 @@ except ModuleNotFoundError:
 class InfrastructureError(RuntimeError):
     pass
 
+
 class HybridRetriever:
     def __init__(self):
         if GraphDatabase is None:
@@ -49,10 +52,15 @@ class HybridRetriever:
 
         try:
             self.chroma_client = chromadb.HttpClient(host=config.chroma_host, port=config.chroma_port)
-            self.collection = self.chroma_client.get_collection("rare_disease_summaries")
-            self.collection.count()
+            self.collection = self.chroma_client.get_collection(SEMANTIC_COLLECTION)
+            if self.collection.count() == 0:
+                raise InfrastructureError(
+                    "ChromaDB semantic collection is empty. Run scripts/ingest_semantic.py --reset."
+                )
         except Exception as exc:
             self.driver.close()
+            if isinstance(exc, InfrastructureError):
+                raise
             raise InfrastructureError(
                 "ChromaDB is unavailable. Grounded diagnostic services cannot run."
             ) from exc
@@ -157,17 +165,28 @@ class HybridRetriever:
 
         return graph_results
 
-    def query_semantic(self, clinical_note, limit=5):
-        note = clinical_note.strip()
-        if not note:
+    def query_semantic(
+        self,
+        clinical_note,
+        selected_symptoms=None,
+        selected_genes=None,
+        limit=10,
+    ):
+        query_text = build_semantic_query(
+            clinical_note,
+            selected_symptoms=selected_symptoms,
+            selected_genes=selected_genes,
+        )
+        if not query_text:
             return []
 
-        query_embedding = self.model.encode([note])
+        query_embedding = self.model.encode([query_text])
+        pool_limit = max(limit, SEMANTIC_POOL_SIZE)
 
         try:
             results = self.collection.query(
                 query_embeddings=query_embedding.tolist(),
-                n_results=limit,
+                n_results=pool_limit,
                 include=["documents", "metadatas", "distances"],
             )
         except ChromaException as exc:
@@ -175,27 +194,210 @@ class HybridRetriever:
                 "ChromaDB query failed. Grounded diagnostic services cannot run."
             ) from exc
 
-        documents = results.get("documents", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
+        candidate_map = {}
+        merge_raw_semantic_results(
+            candidate_map,
+            documents=results.get("documents", [[]])[0],
+            metadatas=results.get("metadatas", [[]])[0],
+            distances=results.get("distances", [[]])[0],
+            selected_symptoms=selected_symptoms or [],
+            selected_genes=selected_genes or [],
+            source="vector",
+        )
 
-        semantic_results = []
+        structured_results = self.query_structured_semantic_candidates(
+            selected_symptoms or [],
+            selected_genes or [],
+        )
+        merge_raw_semantic_results(
+            candidate_map,
+            documents=structured_results["documents"],
+            metadatas=structured_results["metadatas"],
+            distances=[None] * len(structured_results["documents"]),
+            selected_symptoms=selected_symptoms or [],
+            selected_genes=selected_genes or [],
+            source="structured",
+        )
+
+        semantic_results = sorted(
+            candidate_map.values(),
+            key=lambda candidate: candidate["score"],
+            reverse=True,
+        )
+        return semantic_results[:limit]
+
+    def query_structured_semantic_candidates(self, selected_symptoms, selected_genes):
+        """Pull exact gene/HPO profile matches from Chroma metadata documents."""
+        documents = []
+        metadatas = []
         seen = set()
-        for document, metadata, distance in zip(documents, metadatas, distances):
-            disease_name = _extract_disease_name(document)
-            if not disease_name or disease_name in seen:
-                continue
-            seen.add(disease_name)
-            semantic_results.append(
-                {
-                    "disease": disease_name,
-                    "orphacode": (metadata or {}).get("orphacode"),
-                    "score": 1.0 / (1.0 + max(distance, 0.0)),
-                    "summary": document,
-                }
-            )
+        terms = [
+            *[str(gene).strip().upper() for gene in selected_genes if str(gene).strip()],
+            *[str(symptom).strip() for symptom in selected_symptoms if str(symptom).strip()],
+        ]
 
-        return semantic_results
+        for term in dict.fromkeys(terms):
+            try:
+                results = self.collection.get(
+                    where_document={"$contains": term},
+                    limit=STRUCTURED_TERM_LIMIT,
+                    include=["documents", "metadatas"],
+                )
+            except ChromaException:
+                logger.debug("Structured Chroma lookup failed for term: %s", term, exc_info=True)
+                continue
+
+            for document, metadata in zip(
+                results.get("documents", []),
+                results.get("metadatas", []),
+            ):
+                key = semantic_identity_key(metadata or {}, document)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                documents.append(document)
+                metadatas.append(metadata or {})
+
+        return {"documents": documents, "metadatas": metadatas}
+
+
+def build_semantic_query(clinical_note, selected_symptoms=None, selected_genes=None):
+    parts = []
+    note = (clinical_note or "").strip()
+    symptoms = [str(item).strip() for item in (selected_symptoms or []) if str(item).strip()]
+    genes = [str(item).strip().upper() for item in (selected_genes or []) if str(item).strip()]
+
+    if symptoms:
+        parts.append(f"Phenotypes: {'; '.join(dict.fromkeys(symptoms))}.")
+    if genes:
+        parts.append(f"Genes: {'; '.join(dict.fromkeys(genes))}.")
+    if note:
+        parts.append(f"Clinical note: {note}")
+
+    return " ".join(parts).strip()
+
+
+def merge_raw_semantic_results(
+    candidate_map,
+    documents,
+    metadatas,
+    distances,
+    selected_symptoms,
+    selected_genes,
+    source,
+):
+    for rank, (document, metadata, distance) in enumerate(
+        zip(documents, metadatas, distances),
+        start=1,
+    ):
+        candidate = semantic_candidate_from_raw(
+            document=document,
+            metadata=metadata or {},
+            distance=distance,
+            rank=rank,
+            selected_symptoms=selected_symptoms,
+            selected_genes=selected_genes,
+            source=source,
+        )
+        if not candidate:
+            continue
+
+        key = semantic_identity_key(metadata or {}, document)
+        if not key:
+            continue
+
+        existing = candidate_map.get(key)
+        if existing is None or candidate["score"] > existing["score"]:
+            candidate_map[key] = candidate
+
+
+def semantic_candidate_from_raw(
+    document,
+    metadata,
+    distance,
+    rank,
+    selected_symptoms,
+    selected_genes,
+    source,
+):
+    disease_name = metadata.get("disease") or _extract_disease_name(document)
+    if not disease_name:
+        return None
+
+    indexed_symptoms = parse_metadata_list(metadata.get("hpo_terms_json"))
+    indexed_genes = parse_metadata_list(metadata.get("genes_json"))
+    matched_symptoms = matched_terms(selected_symptoms, indexed_symptoms)
+    matched_genes = matched_terms(selected_genes, indexed_genes, normalize_upper=True)
+    vector_score = (
+        1.0 / (1.0 + max(distance, 0.0))
+        if distance is not None
+        else 0.0
+    )
+    score = semantic_rerank_score(
+        vector_score=vector_score,
+        vector_rank=rank if source == "vector" else None,
+        selected_symptoms=selected_symptoms,
+        selected_genes=selected_genes,
+        matched_symptoms=matched_symptoms,
+        matched_genes=matched_genes,
+    )
+
+    return {
+        "disease": disease_name,
+        "orphacode": normalize_orphacode(metadata.get("orphacode")),
+        "score": score,
+        "vector_score": vector_score,
+        "summary": document,
+        "matched_symptoms": matched_symptoms,
+        "matched_genes": matched_genes,
+        "source_pmids": parse_metadata_list(metadata.get("pmids_json")),
+    }
+
+
+def semantic_rerank_score(
+    vector_score,
+    vector_rank,
+    selected_symptoms,
+    selected_genes,
+    matched_symptoms,
+    matched_genes,
+):
+    symptom_score = rate(len(matched_symptoms), len(selected_symptoms))
+    gene_score = 1.0 if matched_genes else 0.0
+    vector_rank_score = 1.0 / vector_rank if vector_rank else 0.0
+    exact_gene_bonus = 0.20 if matched_genes else 0.0
+    exact_symptom_bonus = 0.10 if len(matched_symptoms) >= 2 else 0.0
+    phenotype_completeness_bonus = 0.25 if symptom_score >= 0.8 else 0.0
+    distractor_gene_penalty = (
+        0.08 * (len(matched_genes) - 1)
+        if len(selected_genes) >= 3 and len(matched_genes) > 1
+        else 0.0
+    )
+
+    return (
+        (0.20 * vector_score)
+        + (0.08 * vector_rank_score)
+        + (0.70 * gene_score)
+        + (0.95 * symptom_score)
+        + exact_gene_bonus
+        + exact_symptom_bonus
+        + phenotype_completeness_bonus
+        - distractor_gene_penalty
+    )
+
+
+def rate(numerator, denominator):
+    return numerator / denominator if denominator else 0.0
+
+
+def semantic_identity_key(metadata, document):
+    orphacode = normalize_orphacode((metadata or {}).get("orphacode"))
+    if orphacode:
+        return f"orpha:{orphacode}"
+    disease_name = (metadata or {}).get("disease") or _extract_disease_name(document)
+    if disease_name:
+        return f"name:{disease_name.lower()}"
+    return ""
 
 
 def _extract_disease_name(document):
@@ -205,7 +407,45 @@ def _extract_disease_name(document):
         return None
     if divider in document:
         return document[len(prefix):document.index(divider)].strip()
+    first_sentence = document.find(".")
+    if first_sentence != -1:
+        return document[len(prefix):first_sentence].strip()
     return document[len(prefix):].strip()
+
+
+def normalize_orphacode(orphacode):
+    return str(orphacode or "").replace("ORPHA:", "").strip()
+
+
+def parse_metadata_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if item]
+
+
+def matched_terms(query_terms, indexed_terms, normalize_upper=False):
+    if normalize_upper:
+        indexed_lookup = {str(item).upper(): item for item in indexed_terms}
+        return [
+            indexed_lookup[str(term).upper()]
+            for term in query_terms
+            if str(term).upper() in indexed_lookup
+        ]
+
+    indexed_lookup = {str(item).lower(): item for item in indexed_terms}
+    return [
+        indexed_lookup[str(term).lower()]
+        for term in query_terms
+        if str(term).lower() in indexed_lookup
+    ]
 
 
 def get_infrastructure_status():

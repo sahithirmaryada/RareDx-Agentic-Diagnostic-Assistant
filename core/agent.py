@@ -13,6 +13,7 @@ from mcp.icd10_helper import find_icd10_code
 
 # Load credentials
 client = Groq(api_key=config.groq_api_key) if config.groq_api_key else None
+WEIGHT_TOLERANCE = 1e-6
 
 # --- STEP 1: Define the Shared State ---
 class AgentState(TypedDict):
@@ -28,6 +29,9 @@ class AgentState(TypedDict):
     validated_evidence: List[str]
     final_report: Dict[str, Any]
     audit_trail: Annotated[List[dict], operator.add] 
+    ranking_strategy: str
+    graph_weight: float
+    semantic_weight: float
 
 # --- STEP 2: Define Reasoning Nodes ---
 
@@ -60,6 +64,16 @@ def entity_extractor_node(state: AgentState):
 
 def graph_query_node(state: AgentState):
     """Grounded Neo4j retrieval from clinician-selected symptoms and genes."""
+    if state.get("ranking_strategy") == "semantic_only":
+        log = {
+            "timestamp": str(datetime.now()),
+            "node": "GraphQuery",
+            "action": "Skipped",
+            "details": "Skipped Neo4j traversal for semantic-only ablation.",
+            "evidence_path": "None",
+        }
+        return {"graph_results": [], "audit_trail": [log]}
+
     retriever = get_hybrid_retriever()
     found = retriever.query_graph(
         state.get("selected_symptoms", []),
@@ -77,10 +91,28 @@ def graph_query_node(state: AgentState):
 
 def semantic_search_node(state: AgentState):
     """ChromaDB semantic retrieval from the free-text note, grounded by PubMed citations."""
+    if state.get("ranking_strategy") == "graph_only":
+        log = {
+            "timestamp": str(datetime.now()),
+            "node": "SemanticSearch",
+            "action": "Skipped",
+            "details": "Skipped vector retrieval for graph-only ablation.",
+            "pmid": "None",
+        }
+        return {"semantic_results": [], "audit_trail": [log]}
+
     retriever = get_hybrid_retriever()
-    found = retriever.query_semantic(state.get("clinical_note", ""))
+    found = retriever.query_semantic(
+        state.get("clinical_note", ""),
+        state.get("selected_symptoms", []),
+        state.get("selected_genes", []),
+    )
     for result in found:
-        result["citations"] = resolve_citations(result.get("disease"), result.get("orphacode"))
+        result["citations"] = resolve_citations(
+            result.get("disease"), result.get("orphacode")
+        )
+        if not result["citations"]:
+            result["citations"] = citations_from_pmids(result.get("source_pmids", []))
 
     log = {
         "timestamp": str(datetime.now()),
@@ -93,17 +125,22 @@ def semantic_search_node(state: AgentState):
 
 def fusion_node(state: AgentState):
     """
-    STRICT GUARD: Applies 60/40 Weighted Fusion.
+    STRICT GUARD: Applies graph/semantic weighted fusion.
     Any candidate without a Path or PMID is dropped immediately.
     """
+    ranking_strategy = state.get("ranking_strategy") or "fusion"
+    graph_weight, semantic_weight = resolve_fusion_weights(state, ranking_strategy)
+    include_graph = ranking_strategy != "semantic_only"
+    include_semantic = ranking_strategy != "graph_only"
+
     candidate_map = {}
     
-    for res in state.get("graph_results", []):
+    for res in (state.get("graph_results", []) if include_graph else []):
         key = candidate_key(res)
         candidate_map[key] = {
             "disease": res["disease"],
             "orphacode": res.get("orphacode"),
-            "score": res["score"] * 0.6,
+            "score": res["score"] * graph_weight,
             "graph_paths": res.get("graph_paths", []),
             "citations": [],
             "matched_symptoms": res.get("matched_symptoms", []),
@@ -111,10 +148,10 @@ def fusion_node(state: AgentState):
             "summary": None,
         }
 
-    for res in state.get("semantic_results", []):
+    for res in (state.get("semantic_results", []) if include_semantic else []):
         key = candidate_key(res)
         if key in candidate_map:
-            candidate_map[key]["score"] += res["score"] * 0.4
+            candidate_map[key]["score"] += res["score"] * semantic_weight
             if not candidate_map[key].get("orphacode"):
                 candidate_map[key]["orphacode"] = res.get("orphacode")
             if not candidate_map[key].get("disease"):
@@ -125,11 +162,11 @@ def fusion_node(state: AgentState):
             candidate_map[key] = {
                 "disease": res["disease"],
                 "orphacode": res.get("orphacode"),
-                "score": res["score"] * 0.4,
+                "score": res["score"] * semantic_weight,
                 "graph_paths": [],
                 "citations": res.get("citations", []),
-                "matched_symptoms": [],
-                "matched_genes": [],
+                "matched_symptoms": res.get("matched_symptoms", []),
+                "matched_genes": res.get("matched_genes", []),
                 "summary": res.get("summary"),
             }
 
@@ -153,8 +190,9 @@ def fusion_node(state: AgentState):
     log = {
         "timestamp": str(datetime.now()),
         "node": "FusionGuard",
-        "action": "60/40 Weighted Fusion Applied",
+        "action": f"{ranking_strategy} Ranking Applied",
         "details": (
+            f"Weights graph={graph_weight:.2f}, semantic={semantic_weight:.2f}. "
             f"Verified {len(verified)} candidates. Dropped {len(candidate_map)-len(verified)}. "
             f"Resolved PubMed citations for {graph_only_citation_count} graph-only candidate(s)."
         ),
@@ -235,7 +273,8 @@ def report_node(state: AgentState):
     
     traceability_map = {
         "primary_match": top["disease"],
-        "confidence_score": f"{top['score']:.2f}",
+        "rank_score": f"{top['score']:.2f}",
+        "score_note": "Uncalibrated ranking score; not a probability.",
         "icd10": top.get("icd10"),
         "graph_paths": top.get("graph_paths", []),
         "citations": [article["pmid"] for article in top.get("citations", []) if article.get("pmid")],
@@ -255,8 +294,51 @@ def resolve_citations(disease_name, orphacode=None):
     return articles
 
 
+def citations_from_pmids(pmids):
+    citations = []
+    for pmid in list(dict.fromkeys(pmids or [])):
+        pmid = str(pmid).strip()
+        if not pmid:
+            continue
+        citations.append(
+            {
+                "pmid": pmid,
+                "title": "Orphanet source PMID",
+                "abstract": "PMID supplied by Orphanet phenotype/gene annotation metadata.",
+                "year": "",
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            }
+        )
+    return citations
+
+
 def resolve_icd10_code(disease_name, orphacode=None):
     return find_icd10_code(query_name=disease_name, orphacode=orphacode)
+
+
+def resolve_fusion_weights(state, ranking_strategy):
+    if ranking_strategy == "graph_only":
+        return 1.0, 0.0
+    if ranking_strategy == "semantic_only":
+        return 0.0, 1.0
+
+    graph_weight = state.get("graph_weight")
+    semantic_weight = state.get("semantic_weight")
+    graph_weight = config.graph_weight if graph_weight is None else float(graph_weight)
+    semantic_weight = (
+        config.semantic_weight if semantic_weight is None else float(semantic_weight)
+    )
+    validate_fusion_weights(graph_weight, semantic_weight)
+    return graph_weight, semantic_weight
+
+
+def validate_fusion_weights(graph_weight, semantic_weight):
+    if graph_weight < 0.0 or graph_weight > 1.0:
+        raise ValueError("graph_weight must be between 0.0 and 1.0")
+    if semantic_weight < 0.0 or semantic_weight > 1.0:
+        raise ValueError("semantic_weight must be between 0.0 and 1.0")
+    if abs((graph_weight + semantic_weight) - 1.0) > WEIGHT_TOLERANCE:
+        raise ValueError("graph_weight and semantic_weight must sum to 1.0")
 
 
 def candidate_key(candidate):

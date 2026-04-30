@@ -133,7 +133,6 @@ st.markdown("""
     button[data-baseweb="tab"]:hover {
         background-color: #dee2e6;
         border-color: #adb5bd;
-        transform: translateY(-2px);
         box-shadow: 0 4px 8px rgba(0,0,0,0.1);
     }
     
@@ -201,7 +200,7 @@ with tab1:
         note_col, param_col = st.columns([2, 1])
         
         with note_col:
-            clinical_notes = st.text_area("Unstructured Clinical Notes", placeholder="e.g., 30yo female with butterfly rash and joint pain...", height=250)
+            clinical_notes = st.text_area("Unstructured Clinical Notes", placeholder="e.g., A 10 year-old girl has chronic fatigue ... Examination shows ... Laboratory studies reveal ...", height=250)
         
         with param_col:
             st.session_state.hpo_options = get_all_symptoms() if health_status["neo4j"]["ok"] else []
@@ -252,7 +251,7 @@ with tab1:
                 try:
                     final_state = rare_dx_agent.invoke(initial_state)
                     st.session_state.diagnostic_results = final_state
-                    st.success("Diagnostic processing complete.")
+                    st.success("Diagnostic processing complete. Check the 'Diagnostic Results' and 'Evidence Explorer' tabs above for details.")
                 except InfrastructureError as exc:
                     st.session_state.diagnostic_results = None
                     st.error(str(exc))
@@ -273,7 +272,7 @@ with tab2:
                 with st.container():
                     c1, c2, c3 = st.columns([3, 1, 1])
                     c1.markdown(f"### {can.get('disease', 'Unknown')}")
-                    c2.metric("Confidence Score", f"{int(can.get('score', 0)*100)}%")
+                    c2.metric("Rank Score", f"{float(can.get('score', 0.0)):.2f}")
                     icd10_code = can.get("icd10") or "Unavailable"
                     c3.markdown(f"**ICD-10 Code:** :blue-background[{icd10_code}]")
                     badge_text = ", ".join(can.get("evidence_badges", []))
@@ -289,15 +288,41 @@ with tab2:
 with tab3:
     if st.session_state.diagnostic_results:
         t_map = st.session_state.diagnostic_results.get("final_report", {}).get("traceability_map", {})
-        st.subheader("🛠️ Evidence Grounding")
+        candidates = st.session_state.diagnostic_results.get("candidates", [])
+        st.subheader("Evidence Grounding")
         
         col_a, col_b = st.columns(2)
         with col_a:
-            st.markdown("#### 🕸️ Neo4j Graph Visualization")
-            render_graph_from_paths(t_map.get("graph_paths", []), height=520)
+            st.markdown("#### Neo4j Graph Visualization")
+            graph_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.get("graph_paths")
+            ]
+            if graph_candidates:
+                selected_index = st.selectbox(
+                    "Graph-supported candidate",
+                    options=list(range(len(graph_candidates))),
+                    format_func=lambda index: graph_candidates[index].get(
+                        "disease", f"Candidate {index + 1}"
+                    ),
+                    label_visibility="collapsed",
+                )
+                selected_candidate = graph_candidates[selected_index]
+                st.caption(
+                    f"{selected_candidate.get('disease', 'Selected candidate')} | "
+                    f"{len(selected_candidate.get('graph_paths', []))} graph path(s)"
+                )
+                render_graph_from_paths(
+                    selected_candidate.get("graph_paths", []),
+                    height=520,
+                    graph_id=f"candidate-{selected_index}",
+                )
+            else:
+                render_graph_from_paths(t_map.get("graph_paths", []), height=520)
         
         with col_b:
-            st.markdown("#### 📚 PubMed Evidence")
+            st.markdown("#### PubMed Evidence")
             citations = t_map.get("citations", [])
             if citations:
                 for pmid in citations:
@@ -321,7 +346,7 @@ with tab3:
             else:
                 st.write("No PubMed articles found.")
         
-        st.markdown("#### ✅ Clinical Validation (MCP)")
+        st.markdown("#### Clinical Validation (MCP)")
         for val in t_map.get("mcp_validation", ["No additional grounded metadata available."]):
             st.success(val)
     else:
@@ -330,14 +355,14 @@ with tab3:
 # --- TAB 4: Audit Trail ---
 with tab4:
     if st.session_state.diagnostic_results:
-        st.subheader("🕵️ Agent Decision Log (Audit)")
+        st.subheader("Agent Decision Log (Audit)")
         audit_data = st.session_state.diagnostic_results.get("audit_trail", [])
         
         # Display as a searchable table
         df = pd.DataFrame(audit_data)
         st.dataframe(df, use_container_width=True)
         
-        st.markdown("#### 📄 Final Traceability Map (JSON)")
+        st.markdown("#### Final Traceability Map (JSON)")
         st.json(st.session_state.diagnostic_results.get("final_report", {}).get("traceability_map", {}))
     else:
         st.info("Full audit trail will be available upon execution.")
@@ -346,7 +371,7 @@ with tab4:
 # --- TAB 5: Download Report ---
 with tab5:
     if st.session_state.diagnostic_results:
-        st.subheader("📥 Download Report")
+        st.subheader("Download Report")
         st.markdown("Download your diagnostic results in your preferred format.")
         
         report = st.session_state.diagnostic_results.get("final_report", {})
@@ -355,7 +380,7 @@ with tab5:
         col_pdf, col_excel = st.columns(2)
         
         with col_pdf:
-            st.markdown("### 📕 PDF Report")
+            st.markdown("### PDF Report")
             st.markdown("Professional clinical report suitable for printing and filing.")
             pdf_data = generate_pdf_report(
                 patient_id=st.session_state.diagnostic_results.get("patient_id", "Unknown"),
@@ -370,15 +395,15 @@ with tab5:
                 summary=report.get("summary", ""),
             )
             st.download_button(
-                label="⬇️ Download PDF",
+                label="⬇ Download PDF",
                 data=pdf_data,
                 file_name=f"RareDx_Report_{st.session_state.diagnostic_results.get('patient_id', 'Unknown')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                 mime="application/pdf",
-                use_container_width=True,
+                use_container_width=True, type="primary",
             )
         
         with col_excel:
-            st.markdown("### 📊 Excel Report")
+            st.markdown("### Excel Report")
             st.markdown("Structured data export with multiple sheets for analysis.")
             excel_data = generate_excel_report(
                 patient_id=st.session_state.diagnostic_results.get("patient_id", "Unknown"),
@@ -392,11 +417,11 @@ with tab5:
                 audit_trail=st.session_state.diagnostic_results.get("audit_trail", []),
             )
             st.download_button(
-                label="⬇️ Download Excel",
+                label="⬇ Download Excel",
                 data=excel_data,
                 file_name=f"RareDx_Report_{st.session_state.diagnostic_results.get('patient_id', 'Unknown')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                use_container_width=True, type="primary",
             )
     else:
         st.info("Generate diagnostic results first to enable report downloads.")

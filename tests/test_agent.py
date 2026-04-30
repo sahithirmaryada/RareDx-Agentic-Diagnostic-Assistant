@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from core.agent import rare_dx_agent
+from core.agent import rare_dx_agent, validate_fusion_weights
 
 
 class RareDxAgentTests(unittest.TestCase):
@@ -77,8 +77,21 @@ class RareDxAgentTests(unittest.TestCase):
             "ICD-10 mapped: E74.02",
             final_state["final_report"]["traceability_map"]["mcp_validation"],
         )
+        fusion_events = [
+            event
+            for event in final_state["audit_trail"]
+            if event.get("node") == "FusionGuard"
+        ]
+        self.assertEqual(len(fusion_events), 1)
+        self.assertIn("Weights graph=", fusion_events[0]["details"])
+        self.assertIn("semantic=", fusion_events[0]["details"])
         mock_resolve_citations.assert_called_with("Pompe Disease", "365")
         mock_resolve_icd10_code.assert_called_with("Pompe Disease", "365")
+        fake_retriever.query_semantic.assert_called_with(
+            "Progressive weakness with elevated CK",
+            ["Muscle weakness"],
+            ["GAA"],
+        )
 
     @patch("core.agent.resolve_icd10_code", return_value={"matched_code": None})
     @patch("core.agent.resolve_citations", return_value=[{"pmid": "111111", "title": "Test Article", "abstract": "Test abstract", "year": "2023", "url": "https://pubmed.ncbi.nlm.nih.gov/111111/"}])
@@ -177,6 +190,62 @@ class RareDxAgentTests(unittest.TestCase):
     @patch(
         "core.agent.resolve_icd10_code",
         return_value={
+            "matched_code": "E74.02",
+            "mapping_relation": "Attributed code",
+        },
+    )
+    @patch("core.agent.resolve_citations", return_value=[])
+    @patch("core.agent.get_hybrid_retriever")
+    def test_workflow_keeps_semantic_candidate_with_orphanet_source_pmids(
+        self,
+        mock_get_retriever,
+        mock_resolve_citations,
+        mock_resolve_icd10_code,
+    ):
+        fake_retriever = Mock()
+        fake_retriever.query_graph.return_value = []
+        fake_retriever.query_semantic.return_value = [
+            {
+                "disease": "Pompe Disease",
+                "orphacode": "365",
+                "score": 0.91,
+                "summary": "Disease: Pompe Disease. Phenotypes: Muscle weakness.",
+                "matched_symptoms": ["Muscle weakness"],
+                "matched_genes": ["GAA"],
+                "source_pmids": ["20301438"],
+            }
+        ]
+        mock_get_retriever.return_value = fake_retriever
+
+        final_state = rare_dx_agent.invoke(
+            {
+                "clinical_note": "Progressive weakness with elevated CK",
+                "selected_symptoms": ["Muscle weakness"],
+                "selected_genes": ["gaa"],
+                "graph_results": [],
+                "semantic_results": [],
+                "candidates": [],
+                "validated_evidence": [],
+                "final_report": {},
+                "audit_trail": [],
+                "ranking_strategy": "semantic_only",
+            }
+        )
+
+        self.assertEqual(len(final_state["candidates"]), 1)
+        self.assertEqual(final_state["candidates"][0]["disease"], "Pompe Disease")
+        self.assertEqual(final_state["candidates"][0]["citations"][0]["pmid"], "20301438")
+        self.assertEqual(final_state["candidates"][0]["matched_genes"], ["GAA"])
+        self.assertEqual(
+            final_state["final_report"]["traceability_map"]["citations"],
+            ["20301438"],
+        )
+        mock_resolve_citations.assert_called_with("Pompe Disease", "365")
+        mock_resolve_icd10_code.assert_called_with("Pompe Disease", "365")
+
+    @patch(
+        "core.agent.resolve_icd10_code",
+        return_value={
             "matched_code": "E74.0",
             "mapping_relation": "Inclusion term",
         },
@@ -238,6 +307,15 @@ class RareDxAgentTests(unittest.TestCase):
             "365",
         )
         mock_resolve_icd10_code.assert_called_with("Pompe Disease", "365")
+
+    def test_fusion_weight_validation_requires_normalized_pair(self):
+        validate_fusion_weights(0.7, 0.3)
+
+        with self.assertRaisesRegex(ValueError, "sum to 1.0"):
+            validate_fusion_weights(0.7, 0.2)
+
+        with self.assertRaisesRegex(ValueError, "between 0.0 and 1.0"):
+            validate_fusion_weights(1.2, -0.2)
 
 
 if __name__ == "__main__":
