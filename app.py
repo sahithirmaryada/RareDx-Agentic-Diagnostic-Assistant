@@ -11,6 +11,7 @@ from scripts.db_utils import get_all_symptoms, get_all_genes
 from scripts.report_generator import generate_pdf_report, generate_excel_report
 from typing import Annotated
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from components.graph_visualizer import render_graph_from_paths
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -292,9 +293,8 @@ with tab3:
         
         col_a, col_b = st.columns(2)
         with col_a:
-            st.markdown("#### 🕸️ Neo4j Graph Paths")
-            for path in t_map.get("graph_paths", ["No paths found."]):
-                st.code(path, language="cypher")
+            st.markdown("#### 🕸️ Neo4j Graph Visualization")
+            render_graph_from_paths(t_map.get("graph_paths", []), height=520)
         
         with col_b:
             st.markdown("#### 📚 PubMed Evidence")
